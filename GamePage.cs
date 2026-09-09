@@ -9,6 +9,8 @@ public class GamePage : ContentPage
     const string TitleFont = "Ruslan Display";
     const string BodyFont = "Alegreya";
 
+    enum State { Intro, Playing, GameOver }
+
     static float F(double v) => (float)v;
 
     // Фигуры: I O T S Z J L
@@ -34,10 +36,16 @@ public class GamePage : ContentPage
         "#FF8000", // L оранжевый
     };
 
+    // порядок кнопок: [0]=влево [1]=вниз [2]=вправо [3]=поворот [4]=сброс [5]=пауза
     (string Glyph, string Desc, Action Act)[] Buttons = Array.Empty<(string, string, Action)>();
 
     readonly GraphicsView view;
     readonly IDispatcherTimer timer;
+    Android.Media.SoundPool? soundPool;
+    int tapSoundId, dropSoundId;
+
+    State state = State.Intro;
+    double introStart;
 
     int[,] board = new int[BoardH, BoardW];
     int[] piece = Array.Empty<int>();
@@ -48,8 +56,14 @@ public class GamePage : ContentPage
 
     int score, lines, level;
     int fallMs = 800;
-    bool gameOver, paused;
+    bool paused;
     long acc;
+
+    // подсветка нажатых кнопок
+    int pressIdx = -1;
+    long pressUntil;
+    (double X, double Y) pressBtn;
+    double pressUntilBtn;
 
     // метрики макета (пересчитываются при каждой отрисовке)
     double W, H, titleH, cell, boardX, boardY, boardPxW, boardPxH;
@@ -58,6 +72,8 @@ public class GamePage : ContentPage
     double[] btnX = new double[6];
     double[] btnY = new double[6];
     double btnS;
+    (double X, double Y, double W, double H) againBtnRect;
+    (double X, double Y, double W, double H) exitBtnRect;
 
     public GamePage()
     {
@@ -68,6 +84,8 @@ public class GamePage : ContentPage
         BackgroundColor = Color.FromArgb("#12121C");
         Title = "Тетрис";
 
+        InitSounds();
+
         view.SizeChanged += (_, _) => { W = view.Width; H = view.Height; };
         var tap = new TapGestureRecognizer();
         tap.Tapped += OnTap;
@@ -76,19 +94,57 @@ public class GamePage : ContentPage
         Buttons = new (string, string, Action)[]
         {
             ("\u25C0", "\u0432\u043B\u0435\u0432\u043E", () => TryMove(-1, 0)),
-            ("\u25B2", "\u043F\u043E\u0432\u043E\u0440\u043E\u0442", TryRotate),
             ("\u25BC", "\u0432\u043D\u0438\u0437", SoftDrop),
             ("\u25B6", "\u0432\u043F\u0440\u0430\u0432\u043E", () => TryMove(1, 0)),
+            ("\u25B2", "\u043F\u043E\u0432\u043E\u0440\u043E\u0442", TryRotate),
             ("\u21B3", "\u0441\u0431\u0440\u043E\u0441", HardDrop),
             ("\u2758\u2758", "\u043F\u0430\u0443\u0437\u0430", TogglePause),
         };
 
         InitGame();
 
+        introStart = Environment.TickCount64;
         timer = Dispatcher.CreateTimer();
-        timer.Interval = TimeSpan.FromMilliseconds(16);
+        timer.Interval = TimeSpan.FromMilliseconds(33);
         timer.Tick += OnTick;
         timer.Start();
+    }
+
+    void InitSounds()
+    {
+        try
+        {
+            var builder = new Android.Media.SoundPool.Builder().SetMaxStreams(4);
+            if (builder == null) return;
+            var pool = builder.Build();
+            if (pool == null) return;
+            soundPool = pool;
+            tapSoundId = LoadSound(pool, "tap.wav");
+            dropSoundId = LoadSound(pool, "drop.wav");
+        }
+        catch { soundPool = null; }
+    }
+
+    int LoadSound(Android.Media.SoundPool pool, string asset)
+    {
+        var file = Path.Combine(FileSystem.CacheDirectory, asset);
+        if (!File.Exists(file))
+        {
+            using var src = File.OpenRead(asset);
+            using var dst = File.Create(file);
+            src.CopyTo(dst);
+        }
+        return pool.Load(file, 1);
+    }
+
+    void PlayTap()
+    {
+        try { soundPool?.Play(tapSoundId, 0.5f, 0.5f, 1, 0, 1f); } catch { }
+    }
+
+    void PlayDrop()
+    {
+        try { soundPool?.Play(dropSoundId, 0.7f, 0.7f, 1, 0, 0.7f); } catch { }
     }
 
     // ---- Инициализация ----
@@ -98,7 +154,7 @@ public class GamePage : ContentPage
         score = lines = level = 0;
         fallMs = 800;
         acc = 0;
-        gameOver = false;
+        state = State.Playing;
         paused = false;
         SpawnNext();
         SpawnPiece();
@@ -119,7 +175,7 @@ public class GamePage : ContentPage
         py = 0;
         SpawnNext();
         if (Collides(piece, px, py))
-            gameOver = true;
+            state = State.GameOver;
     }
 
     // ---- Логика ----
@@ -147,7 +203,7 @@ public class GamePage : ContentPage
 
     void TryMove(int dx, int dy)
     {
-        if (gameOver || paused) return;
+        if (state != State.Playing || paused) return;
         if (!Collides(piece, px + dx, py + dy))
         {
             px += dx;
@@ -158,7 +214,7 @@ public class GamePage : ContentPage
 
     void SoftDrop()
     {
-        if (gameOver || paused) return;
+        if (state != State.Playing || paused) return;
         if (!Collides(piece, px, py + 1))
         {
             py++;
@@ -169,7 +225,7 @@ public class GamePage : ContentPage
 
     void TryRotate()
     {
-        if (gameOver || paused) return;
+        if (state != State.Playing || paused) return;
         var r = Rotate(piece);
         foreach (int kick in new[] { 0, -1, 1, -2, 2 })
         {
@@ -185,19 +241,22 @@ public class GamePage : ContentPage
 
     void HardDrop()
     {
-        if (gameOver || paused) return;
+        if (state != State.Playing || paused) return;
+        bool moved = false;
         while (!Collides(piece, px, py + 1))
         {
             py++;
             score += 2;
+            moved = true;
         }
         view.Invalidate();
+        if (moved) PlayDrop();
         LockPiece();
     }
 
     void TogglePause()
     {
-        if (gameOver) return;
+        if (state != State.Playing) return;
         paused = !paused;
         view.Invalidate();
     }
@@ -245,8 +304,24 @@ public class GamePage : ContentPage
 
     void OnTick(object? s, EventArgs e)
     {
-        if (gameOver || paused) { acc = 0; return; }
-        acc += 16;
+        long now = Environment.TickCount64;
+        bool dirty = false;
+
+        if (state == State.Intro)
+        {
+            dirty = true; // анимация частиц
+            if (now - introStart > 2600)
+                InitGame();
+            if (dirty) view.Invalidate();
+            return;
+        }
+
+        if (state != State.Playing) return;
+        if (now >= pressUntil) { pressIdx = -1; dirty = true; }
+        if (now >= pressUntilBtn) { pressBtn = (0, 0); dirty = true; }
+
+        if (paused) { acc = 0; if (dirty) view.Invalidate(); return; }
+        acc += 33;
         bool moved = false;
         while (acc >= fallMs)
         {
@@ -254,21 +329,55 @@ public class GamePage : ContentPage
             if (!Collides(piece, px, py + 1)) { py++; moved = true; }
             else { LockPiece(); break; }
         }
-        if (moved) view.Invalidate();
+        if (moved || dirty) view.Invalidate();
+    }
+
+    void SetPress(int idx)
+    {
+        pressIdx = idx;
+        pressUntil = Environment.TickCount64 + 130;
     }
 
     // ---- Управление тапами ----
     void OnTap(object? sender, TappedEventArgs e)
     {
-        if (gameOver) { InitGame(); return; }
-
         var pos = e.GetPosition(view);
         double tapX = pos?.X ?? 0;
         double tapY = pos?.Y ?? 0;
 
+        if (state == State.Intro)
+        {
+            introStart = Environment.TickCount64; // тап во время заставки просто ждёт
+            return;
+        }
+
+        if (state == State.GameOver)
+        {
+            var again = againBtnRect;
+            var exit = exitBtnRect;
+            if (tapX >= again.X && tapX <= again.X + again.W && tapY >= again.Y && tapY <= again.Y + again.H)
+            {
+                PlayTap();
+                pressBtn = (again.X + again.W / 2, again.Y + again.H / 2);
+                pressUntilBtn = Environment.TickCount64 + 180;
+                InitGame();
+            }
+            else if (tapX >= exit.X && tapX <= exit.X + exit.W && tapY >= exit.Y && tapY <= exit.Y + exit.H)
+            {
+                PlayTap();
+                pressBtn = (exit.X + exit.W / 2, exit.Y + exit.H / 2);
+                pressUntilBtn = Environment.TickCount64 + 180;
+                MainActivity.Current?.FinishAffinity();
+            }
+            return;
+        }
+
+        // кнопки
         for (int i = 0; i < Buttons.Length; i++)
             if (tapX >= btnX[i] && tapX <= btnX[i] + btnS && tapY >= btnY[i] && tapY <= btnY[i] + btnS)
             {
+                PlayTap();
+                SetPress(i);
                 Buttons[i].Act();
                 return;
             }
@@ -276,19 +385,29 @@ public class GamePage : ContentPage
         if (paused)
         {
             paused = false;
+            PlayTap();
             view.Invalidate();
             return;
         }
 
         // тап-зоны по сторонам экрана
         if (tapY < boardY)
-            TryRotate();                  // верх — поворот
+        {
+            TryRotate();           // верх — поворот
+            SetPress(3);
+        }
         else if (tapY > boardY + boardPxH)
-            HardDrop();                   // низ — быстрый сброс
+            HardDrop();            // низ — быстрый сброс
         else if (tapX < W / 2)
-            TryMove(-1, 0);               // левая сторона — влево
+        {
+            TryMove(-1, 0);        // левая сторона — влево
+            SetPress(0);
+        }
         else
-            TryMove(1, 0);                // правая сторона — вправо
+        {
+            TryMove(1, 0);         // правая сторона — вправо
+            SetPress(2);
+        }
     }
 
     // ---- Макет (книжная раскладка, статистика справа) ----
@@ -297,43 +416,46 @@ public class GamePage : ContentPage
         double margin = Math.Max(8, W * 0.035);
         titleH = Math.Max(44, H * 0.055);
 
-        double controlsH = H * 0.21;
-        btnS = Math.Min((W - margin * 2) / 4.6, controlsH * 0.78);
-
-        // правая панель статистики
-        panelW = Math.Min(W * 0.30, 150);
-        double gap = margin;
-        double boardAreaW = W - margin * 2 - panelW - gap;
+        // кнопки: клавиатурный расклад, на 20% меньше, приподняты выше
+        double controlsH = H * 0.19;
+        btnS = Math.Min((W - margin * 2) / 4.8, controlsH * 0.72) * 0.8;
 
         double availH = H - titleH - controlsH - margin * 3;
-        cell = Math.Floor(Math.Min(boardAreaW / BoardW, availH / BoardH));
+        cell = Math.Floor(Math.Min((W - margin * 2) / BoardW, availH / BoardH));
         boardX = margin;
         boardY = titleH + margin;
         boardPxW = cell * BoardW;
         boardPxH = cell * BoardH;
 
-        // карточки правой панели: [Дальше] [Счёт] [Линии] [Уровень]
+        // правая панель статистики
+        panelW = Math.Min(W * 0.30, 150);
+        double gap = margin;
+        double boardAreaW = W - margin * 2 - panelW - gap;
         panelX = margin + boardAreaW + gap;
         panelY = boardY;
         nextCardH = Math.Min(92, cell * 3.2);
         panelCardH = Math.Min(72, cell * 2.5);
 
-        // кнопки: 2 ряда по 3
-        double rowGap = 14;
-        double descH = Math.Max(14, btnS * 0.26);
+        // кнопки: 4 колонки, 2 ряда. Стрелки — крест как на клавиатуре, пауза правее.
+        double rowGap = btnS * 0.30;
+        double descH = Math.Max(12, btnS * 0.26);
         double totalBtnH = btnS * 2 + rowGap + descH;
-        double bottom = H - margin;
+        double bottom = H - margin - H * 0.015;   // приподнять над нижней кромкой
         double row1Y = bottom - totalBtnH;
         double row2Y = row1Y + btnS + rowGap;
         btnAreaTop = row1Y;
-        double step = (W - margin * 2) / 3;
-        for (int i = 0; i < 6; i++)
-        {
-            int row = i / 3, col = i % 3;
-            double cellX = margin + col * step;
-            btnX[i] = cellX + (step - btnS) / 2;
-            btnY[i] = row == 0 ? row1Y : row2Y;
-        }
+
+        double step = (W - margin * 2) / 4;
+        double col(double i) => margin + i * step + (step - btnS) / 2;
+
+        // ряд 1: ▲ поворот (над «вниз») + ⏸ пауза справа
+        btnX[3] = col(1); btnY[3] = row1Y;   // ▲ поворот
+        btnX[5] = col(3); btnY[5] = row1Y;   // ⏸ пауза — правее
+        // ряд 2: ◀ влево, ▼ вниз, ▶ вправо, ⬇ сброс
+        btnX[0] = col(0); btnY[0] = row2Y;   // ◀ влево
+        btnX[1] = col(1); btnY[1] = row2Y;   // ▼ вниз
+        btnX[2] = col(2); btnY[2] = row2Y;   // ▶ вправо
+        btnX[4] = col(3); btnY[4] = row2Y;   // ⬇ сброс
     }
 
     // ---- Отрисовка ----
@@ -344,6 +466,12 @@ public class GamePage : ContentPage
 
         g.FillColor = Color.FromArgb("#12121C");
         g.FillRectangle(F(0), F(0), F(W), F(H));
+
+        if (state == State.Intro)
+        {
+            DrawIntro(g);
+            return;
+        }
 
         DrawTitle(g);
 
@@ -384,7 +512,7 @@ public class GamePage : ContentPage
                 if (board[y, x] > 0)
                     AddBlock(board[y, x] - 1, boardX + x * cell, boardY + y * cell);
 
-        if (!gameOver)
+        if (state == State.Playing)
         {
             int ty = py;
             while (!Collides(piece, px, ty + 1)) ty++;
@@ -428,7 +556,11 @@ public class GamePage : ContentPage
 
         DrawRightPanel(g);
         DrawButtons(g);
-        DrawOverlay(g);
+
+        if (state == State.GameOver)
+            DrawGameOver(g);
+        else if (paused)
+            DrawPauseOverlay(g);
     }
 
     void SetFont(ICanvas g, double size, bool bold, Color color, string family = BodyFont)
@@ -442,6 +574,52 @@ public class GamePage : ContentPage
     {
         SetFont(g, titleH * 0.7, true, Color.FromArgb("#FFD700"), TitleFont);
         g.DrawString("\u0422\u0435\u0442\u0440\u0438\u0441", F(boardX + boardPxW / 2), F(titleH * 0.85), HorizontalAlignment.Center);
+    }
+
+    // ---- Заставка «KDOPROG presents games Tetris» ----
+    void DrawIntro(ICanvas g)
+    {
+        double t = (Environment.TickCount64 - introStart) / 1000.0;
+        double pulse = 0.5 + 0.5 * Math.Sin(t * 2.4);
+
+        // падающие блошки по краям
+        for (int i = 0; i < 14; i++)
+        {
+            double speed = 0.10 + (i % 5) * 0.03;
+            double bx = W * (0.04 + 0.09 * (i % 7));
+            if (i > 6) bx = W - W * (0.04 + 0.09 * ((i - 7) % 7));
+            double by = (t * speed * H + i * H * 0.13) % (H * 1.2) - H * 0.1;
+            double bs = Math.Max(12, W * 0.045);
+            var c = Color.FromArgb(ShapeHex[i % ShapeHex.Length]);
+            g.Alpha = 0.55f;
+            g.FillColor = c;
+            g.FillRoundedRectangle(F(bx), F(by), F(bs), F(bs), F(bs * 0.18));
+            g.Alpha = 1f;
+        }
+
+        double cx = W / 2;
+        double fs1 = Math.Min(W * 0.105, 44);
+        SetFont(g, fs1 * 0.62, true, Color.FromArgb("#00BFFF"), BodyFont);
+        g.DrawString("KDOPROG", F(cx), F(H * 0.28), HorizontalAlignment.Center);
+
+        SetFont(g, fs1 * 0.4, false, Color.FromArgb("#A0A0C3"), BodyFont);
+        g.DrawString("presents games", F(cx), F(H * 0.28 + fs1 * 0.85), HorizontalAlignment.Center);
+
+        double fs2 = Math.Min(W * 0.24, 92) * (1 + 0.04 * pulse);
+        SetFont(g, fs2, true, Color.FromArgb("#FFD700"), TitleFont);
+        g.DrawString("\u0422\u0415\u0422\u0420\u0418\u0421", F(cx), F(H * 0.52), HorizontalAlignment.Center);
+
+        // декоративный ряд фигурок
+        double iy = H * 0.62;
+        for (int i = 0; i < 7; i++)
+        {
+            var c = Color.FromArgb(ShapeHex[i]);
+            g.FillColor = c;
+            g.FillRoundedRectangle(F(cx - 3 * W * 0.075 + i * W * 0.075 - W * 0.017), F(iy), F(W * 0.034), F(W * 0.034), F(W * 0.006));
+        }
+
+        SetFont(g, fs1 * 0.34, false, new Color(F(0.75 + 0.25 * pulse), F(0.8 + 0.2 * pulse), 1f, 1f), BodyFont);
+        g.DrawString("\u0442\u0430\u043F\u043D\u0438\u0442\u0435 \u0434\u043B\u044F \u043D\u0430\u0447\u0430\u043B\u0430", F(cx), F(H * 0.86), HorizontalAlignment.Center);
     }
 
     void DrawRightPanel(ICanvas g)
@@ -498,59 +676,148 @@ public class GamePage : ContentPage
 
     void DrawButtons(ICanvas g)
     {
-        double descH = Math.Max(13, btnS * 0.24);
+        double descH = Math.Max(12, btnS * 0.24);
         double rad = btnS * 0.22;
+        long now = Environment.TickCount64;
 
-        SetFont(g, Math.Max(11, btnS * 0.17), false, Color.FromArgb("#7A7AA0"));
-        g.DrawString("\u2191 \u043F\u043E\u0432\u043E\u0440\u043E\u0442  \u00B7  \u2193 \u0441\u0431\u0440\u043E\u0441  \u00B7  \u2190/\u2192 \u0441\u0442\u043E\u0440\u043E\u043D\u044B \u044D\u043A\u0440\u0430\u043D\u0430", F(W / 2), F(btnAreaTop - descH * 0.3), HorizontalAlignment.Center);
+        SetFont(g, Math.Max(10, btnS * 0.16), false, Color.FromArgb("#7A7AA0"));
+        g.DrawString("\u2191 \u043F\u043E\u0432\u043E\u0440\u043E\u0442 \u00B7 \u2193 \u0441\u0431\u0440\u043E\u0441 \u00B7 \u2190/\u2192 \u0441\u0442\u043E\u0440\u043E\u043D\u044B \u044D\u043A\u0440\u0430\u043D\u0430", F(W / 2), F(btnAreaTop - descH * 0.4), HorizontalAlignment.Center);
 
         for (int i = 0; i < Buttons.Length; i++)
         {
             var (glyph, desc, _) = Buttons[i];
             double x = btnX[i], y = btnY[i];
+            bool pressed = i == pressIdx && now < pressUntil;
 
-            g.FillColor = paused ? new Color(0.14f, 0.14f, 0.22f, 1f) : Color.FromArgb("#232340");
+            // свечение при нажатии
+            if (pressed)
+            {
+                g.Alpha = 0.35f;
+                g.FillColor = Color.FromArgb("#00E5FF");
+                g.FillRoundedRectangle(F(x - 4), F(y - 4), F(btnS + 8), F(btnS + 8), F(rad + 4));
+                g.Alpha = 1f;
+            }
+
+            g.FillColor = pressed
+                ? Color.FromArgb("#35C4FF")
+                : (paused && i != 5 ? Color.FromArgb("#1A1A2E") : Color.FromArgb("#232340"));
             g.FillRoundedRectangle(F(x), F(y), F(btnS), F(btnS), F(rad));
-            g.StrokeColor = paused ? Color.FromArgb("#3A3A5C") : Color.FromArgb("#00BFFF");
-            g.StrokeSize = 1.5f;
+            g.StrokeColor = pressed ? Color.FromArgb("#FFFFFF") : Color.FromArgb("#00BFFF");
+            g.StrokeSize = pressed ? 2.5f : 1.5f;
             g.DrawRoundedRectangle(F(x), F(y), F(btnS), F(btnS), F(rad));
 
-            SetFont(g, btnS * 0.4, true, Colors.White);
+            SetFont(g, btnS * 0.42, true, pressed ? Color.FromArgb("#002233") : Colors.White);
             g.DrawString(glyph, F(x + btnS / 2), F(y + btnS * 0.62), HorizontalAlignment.Center);
 
-            SetFont(g, descH, true, Color.FromArgb("#A0A0C3"));
+            SetFont(g, descH, true, pressed ? Color.FromArgb("#BFE9FF") : Color.FromArgb("#A0A0C3"));
             g.DrawString(desc, F(x + btnS / 2), F(y + btnS + descH * 0.9), HorizontalAlignment.Center);
+        }
+
+        // подсветка кнопки, нажатой из заставки/тап-зоны (центр-точка)
+        if (pressBtn.X > 0 && now < pressUntilBtn)
+        {
+            g.Alpha = 0.35f;
+            g.FillColor = Color.FromArgb("#FFD700");
+            double pr = Math.Max(30, btnS * 0.5);
+            g.FillEllipse(F(pressBtn.X - pr), F(pressBtn.Y - pr), F(pr * 2), F(pr * 2));
+            g.Alpha = 1f;
         }
     }
 
-    void DrawOverlay(ICanvas g)
+    void DrawBigButton(ICanvas g, double x, double y, double w, double h, string text, Color bg, Color stroke)
     {
-        if (!gameOver && !paused) return;
+        double r = Math.Min(14, h * 0.35);
+        g.FillColor = bg;
+        g.FillRoundedRectangle(F(x), F(y), F(w), F(h), F(r));
+        g.StrokeColor = stroke;
+        g.StrokeSize = 2f;
+        g.DrawRoundedRectangle(F(x), F(y), F(w), F(h), F(r));
+        SetFont(g, h * 0.36, true, Colors.White, TitleFont);
+        g.DrawString(text, F(x + w / 2), F(y + h * 0.62), HorizontalAlignment.Center);
+    }
+
+    // ---- Экран конца игры ----
+    void DrawGameOver(ICanvas g)
+    {
+        g.Alpha = 0.85f;
+        g.FillColor = Color.FromArgb("#05050C");
+        g.FillRectangle(F(0), F(0), F(W), F(H));
+        g.Alpha = 1f;
+
+        double t = (Environment.TickCount64 - introStart) / 1000.0;
+        double pulse = 0.5 + 0.5 * Math.Sin(t * 2.0);
+        double cx = W / 2;
+
+        double bw = Math.Min(W * 0.86, 360);
+        double bh = Math.Min(H * 0.52, 460);
+        double bx = (W - bw) / 2;
+        double by = (H - bh) / 2 - H * 0.02;
+
+        // рамка-карточка с золотым свечением
+        g.Alpha = F(0.25 + 0.15 * pulse);
+        g.FillColor = Color.FromArgb("#FFD700");
+        g.FillRoundedRectangle(F(bx - 6), F(by - 6), F(bw + 12), F(bh + 12), F(22));
+        g.Alpha = 1f;
+        g.FillColor = Color.FromArgb("#191928");
+        g.FillRoundedRectangle(F(bx), F(by), F(bw), F(bh), F(18));
+        g.StrokeColor = Color.FromArgb("#FFD700");
+        g.StrokeSize = 2f;
+        g.DrawRoundedRectangle(F(bx), F(by), F(bw), F(bh), F(18));
+
+        SetFont(g, Math.Min(bw * 0.13, 34), true, Color.FromArgb("#FFD700"), TitleFont);
+        g.DrawString("\u0418\u0433\u0440\u0430 \u043E\u043A\u043E\u043D\u0447\u0435\u043D\u0430", F(cx), F(by + bh * 0.13), HorizontalAlignment.Center);
+
+        // декоративная линия
+        g.StrokeColor = Color.FromArgb("#4B4B78");
+        g.StrokeSize = 1.5f;
+        var line = new PathF();
+        line.MoveTo(F(bx + bw * 0.15), F(by + bh * 0.20)).LineTo(F(bx + bw * 0.85), F(by + bh * 0.20));
+        g.DrawPath(line);
+
+        double rowY = by + bh * 0.30;
+        double rowH = bh * 0.115;
+        double fs = Math.Min(rowH * 0.5, 20);
+        (string, string, Color)[] stats =
+        {
+            ("Счёт", score.ToString(), Color.FromArgb("#FFCC00")),
+            ("Линии", lines.ToString(), Color.FromArgb("#33CC33")),
+            ("Уровень", level.ToString(), Color.FromArgb("#00BFFF")),
+        };
+        foreach (var (label, value, color) in stats)
+        {
+            SetFont(g, fs, true, Color.FromArgb("#A0A0C3"));
+            g.DrawString(label, F(bx + bw * 0.22), F(rowY + rowH * 0.7), HorizontalAlignment.Center);
+            SetFont(g, fs * 1.25, true, color, TitleFont);
+            g.DrawString(value, F(bx + bw * 0.75), F(rowY + rowH * 0.75), HorizontalAlignment.Center);
+            rowY += rowH;
+        }
+
+        double btnW = (bw - 3 * bw * 0.06) / 2;
+        double btnH = Math.Min(bh * 0.14, 54);
+        double btnY = by + bh * 0.78;
+        double b1x = bx + bw * 0.06;
+        double b2x = bx + bw * 0.06 + btnW + bw * 0.06;
+        againBtnRect = (b1x, btnY, btnW, btnH);
+        exitBtnRect = (b2x, btnY, btnW, btnH);
+        DrawBigButton(g, b1x, btnY, btnW, btnH, "\u0417\u0430\u043D\u043E\u0432\u043E", Color.FromArgb("#0E8A46"), Color.FromArgb("#33CC33"));
+        DrawBigButton(g, b2x, btnY, btnW, btnH, "\u0412\u044B\u0445\u043E\u0434", Color.FromArgb("#8A2020"), Color.FromArgb("#FF5050"));
+    }
+
+    void DrawPauseOverlay(ICanvas g)
+    {
         g.Alpha = 0.78f;
         g.FillColor = Color.FromArgb("#0A0A14");
         g.FillRectangle(F(0), F(0), F(W), F(H));
         g.Alpha = 1f;
 
-        string title = gameOver ? "\u0418\u0433\u0440\u0430 \u043E\u043A\u043E\u043D\u0447\u0435\u043D\u0430" : "\u041F\u0430\u0443\u0437\u0430";
-        string? sub = gameOver ? $"Счёт: {score}" : null;
-        string hint = gameOver
-            ? "Тапните — начать заново"
-            : "Тап «Пауза» или поле — продолжить";
-        Color c = gameOver ? Color.FromArgb("#FF5050") : Color.FromArgb("#FFCC00");
-
         double fs = Math.Min(40, boardPxW * 0.085);
         double cx = boardX + boardPxW / 2;
         double cy = boardY + boardPxH / 3;
 
-        SetFont(g, fs, true, c, TitleFont);
-        g.DrawString(title, F(cx), F(cy), HorizontalAlignment.Center);
-        if (sub != null)
-        {
-            SetFont(g, fs * 0.6, true, c);
-            g.DrawString(sub, F(cx), F(cy + fs * 1.5), HorizontalAlignment.Center);
-        }
+        SetFont(g, fs, true, Color.FromArgb("#FFCC00"), TitleFont);
+        g.DrawString("\u041F\u0430\u0443\u0437\u0430", F(cx), F(cy), HorizontalAlignment.Center);
         SetFont(g, fs * 0.45, false, Colors.White);
-        g.DrawString(hint, F(cx), F(cy + fs * (sub != null ? 2.5 : 1.9)), HorizontalAlignment.Center);
+        g.DrawString("\u0422\u0430\u043F \u00AB\u041F\u0430\u0443\u0437\u0430\u00BB \u0438\u043B\u0438 \u043F\u043E \u043F\u043E\u043B\u044E \u2014 \u043F\u0440\u043E\u0434\u043E\u043B\u0436\u0438\u0442\u044C", F(cx), F(cy + fs * 1.9), HorizontalAlignment.Center);
     }
 
     sealed class PageDrawable : IDrawable

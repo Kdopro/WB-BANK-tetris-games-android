@@ -22,9 +22,12 @@
 		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
 		<ApplicationVersion>1</ApplicationVersion>
 
-		<!-- Target Android 15 (35) — актуально для Poco 7/8 Pro; min 24 (Android 7.0) -->
+		<!-- Poco 8 Pro: флагман 2026, Android 16 (API 36), 16 KB memory page size.
+		     targetSdk = 36 (совпадает с ОС устройства; Android НЕ блокирует установку по targetSdk).
+		     min 24 (Android 7.0). Нативные библиотеки выравниваются под 16 KB (обязательно для
+		     устройств со страницей памяти 16 КБ, иначе приложение падает при старте). -->
 		<SupportedOSPlatformVersion>24.0</SupportedOSPlatformVersion>
-		<AndroidTargetPlatformVersion>36.0</AndroidTargetPlatformVersion>
+		<AndroidNativeLibrary16KBAligned>true</AndroidNativeLibrary16KBAligned>
 	</PropertyGroup>
 
 	<ItemGroup>
