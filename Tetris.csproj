@@ -19,8 +19,8 @@
 		<ApplicationId>ru.wbbank.tetris</ApplicationId>
 
 		<!-- Versions -->
-		<ApplicationDisplayVersion>1.0</ApplicationDisplayVersion>
-		<ApplicationVersion>1</ApplicationVersion>
+		<ApplicationDisplayVersion>5.1</ApplicationDisplayVersion>
+		<ApplicationVersion>51</ApplicationVersion>
 
 		<!-- Poco 8 Pro: флагман 2026, Android 16 (API 36), 16 KB memory page size.
 		     targetSdk = 36 (совпадает с ОС устройства; Android НЕ блокирует установку по targetSdk).

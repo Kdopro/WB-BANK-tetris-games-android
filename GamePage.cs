@@ -8,8 +8,9 @@ public class GamePage : ContentPage
     const int BoardH = 20;
     const string TitleFont = "Ruslan Display";
     const string BodyFont = "Alegreya";
+    const double UiScale = 0.85; // масштаб всех модулей -15%
 
-    enum State { Intro, Playing, GameOver }
+    enum State { Menu, Playing, GameOver }
 
     static float F(double v) => (float)v;
 
@@ -44,8 +45,11 @@ public class GamePage : ContentPage
     Android.Media.SoundPool? soundPool;
     int tapSoundId, dropSoundId;
 
-    State state = State.Intro;
-    double introStart;
+    State state = State.Menu;
+    long stateStart; // когда вошло в состояние (для анимаций)
+    int selectedSpeed = 1;
+    static readonly int[] SpeedBaseMs = { 1100, 750, 420 };
+    static readonly string[] SpeedNames = { "Медленно", "Средне", "Быстро" };
 
     int[,] board = new int[BoardH, BoardW];
     int[] piece = Array.Empty<int>();
@@ -55,7 +59,7 @@ public class GamePage : ContentPage
     int nextIdx;
 
     int score, lines, level;
-    int fallMs = 800;
+    int fallMs = 750;
     bool paused;
     long acc;
 
@@ -72,6 +76,12 @@ public class GamePage : ContentPage
     double[] btnX = new double[6];
     double[] btnY = new double[6];
     double btnS;
+    (double X, double Y, double W, double H)[] speedRect =
+    {
+        (0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)
+    };
+    (double X, double Y, double W, double H) playRect;
+    (double X, double Y, double W, double H) menuExitRect;
     (double X, double Y, double W, double H) againBtnRect;
     (double X, double Y, double W, double H) exitBtnRect;
 
@@ -101,9 +111,9 @@ public class GamePage : ContentPage
             ("\u2758\u2758", "\u043F\u0430\u0443\u0437\u0430", TogglePause),
         };
 
-        InitGame();
+        state = State.Menu;
+        stateStart = Environment.TickCount64;
 
-        introStart = Environment.TickCount64;
         timer = Dispatcher.CreateTimer();
         timer.Interval = TimeSpan.FromMilliseconds(33);
         timer.Tick += OnTick;
@@ -147,17 +157,25 @@ public class GamePage : ContentPage
         try { soundPool?.Play(dropSoundId, 0.7f, 0.7f, 1, 0, 0.7f); } catch { }
     }
 
-    // ---- Инициализация ----
-    void InitGame()
+    // ---- Переходы состояний ----
+    void StartGame()
     {
         board = new int[BoardH, BoardW];
         score = lines = level = 0;
-        fallMs = 800;
+        fallMs = SpeedBaseMs[selectedSpeed];
         acc = 0;
-        state = State.Playing;
         paused = false;
+        state = State.Playing;
+        stateStart = Environment.TickCount64;
         SpawnNext();
         SpawnPiece();
+        view.Invalidate();
+    }
+
+    void ShowMenu()
+    {
+        state = State.Menu;
+        stateStart = Environment.TickCount64;
         view.Invalidate();
     }
 
@@ -298,25 +316,21 @@ public class GamePage : ContentPage
             score += points[Math.Min(cleared, 4)] * level;
             lines += cleared;
             level = lines / 10 + 1;
-            fallMs = Math.Max(100, 800 - (level - 1) * 70);
+            fallMs = Math.Max(100, SpeedBaseMs[selectedSpeed] - (level - 1) * 70);
         }
     }
 
     void OnTick(object? s, EventArgs e)
     {
         long now = Environment.TickCount64;
-        bool dirty = false;
 
-        if (state == State.Intro)
+        if (state == State.Menu || state == State.GameOver)
         {
-            dirty = true; // анимация частиц
-            if (now - introStart > 2600)
-                InitGame();
-            if (dirty) view.Invalidate();
+            view.Invalidate(); // анимация
             return;
         }
 
-        if (state != State.Playing) return;
+        bool dirty = false;
         if (now >= pressUntil) { pressIdx = -1; dirty = true; }
         if (now >= pressUntilBtn) { pressBtn = (0, 0); dirty = true; }
 
@@ -338,6 +352,12 @@ public class GamePage : ContentPage
         pressUntil = Environment.TickCount64 + 130;
     }
 
+    void SetPressAt(double x, double y)
+    {
+        pressBtn = (x, y);
+        pressUntilBtn = Environment.TickCount64 + 180;
+    }
+
     // ---- Управление тапами ----
     void OnTap(object? sender, TappedEventArgs e)
     {
@@ -345,9 +365,35 @@ public class GamePage : ContentPage
         double tapX = pos?.X ?? 0;
         double tapY = pos?.Y ?? 0;
 
-        if (state == State.Intro)
+        if (state == State.Menu)
         {
-            introStart = Environment.TickCount64; // тап во время заставки просто ждёт
+            for (int i = 0; i < 3; i++)
+            {
+                var r = speedRect[i];
+                if (tapX >= r.X && tapX <= r.X + r.W && tapY >= r.Y && tapY <= r.Y + r.H)
+                {
+                    selectedSpeed = i;
+                    PlayTap();
+                    SetPressAt(r.X + r.W / 2, r.Y + r.H / 2);
+                    return;
+                }
+            }
+            var p = playRect;
+            if (tapX >= p.X && tapX <= p.X + p.W && tapY >= p.Y && tapY <= p.Y + p.H)
+            {
+                PlayTap();
+                SetPressAt(p.X + p.W / 2, p.Y + p.H / 2);
+                StartGame();
+                return;
+            }
+            var ex = menuExitRect;
+            if (tapX >= ex.X && tapX <= ex.X + ex.W && tapY >= ex.Y && tapY <= ex.Y + ex.H)
+            {
+                PlayTap();
+                SetPressAt(ex.X + ex.W / 2, ex.Y + ex.H / 2);
+                MainActivity.Current?.FinishAffinity();
+                return;
+            }
             return;
         }
 
@@ -358,16 +404,14 @@ public class GamePage : ContentPage
             if (tapX >= again.X && tapX <= again.X + again.W && tapY >= again.Y && tapY <= again.Y + again.H)
             {
                 PlayTap();
-                pressBtn = (again.X + again.W / 2, again.Y + again.H / 2);
-                pressUntilBtn = Environment.TickCount64 + 180;
-                InitGame();
+                SetPressAt(again.X + again.W / 2, again.Y + again.H / 2);
+                StartGame();
             }
             else if (tapX >= exit.X && tapX <= exit.X + exit.W && tapY >= exit.Y && tapY <= exit.Y + exit.H)
             {
                 PlayTap();
-                pressBtn = (exit.X + exit.W / 2, exit.Y + exit.H / 2);
-                pressUntilBtn = Environment.TickCount64 + 180;
-                MainActivity.Current?.FinishAffinity();
+                SetPressAt(exit.X + exit.W / 2, exit.Y + exit.H / 2);
+                ShowMenu();
             }
             return;
         }
@@ -414,33 +458,35 @@ public class GamePage : ContentPage
     void Layout()
     {
         double margin = Math.Max(8, W * 0.035);
-        titleH = Math.Max(44, H * 0.055);
+        titleH = Math.Max(34, H * 0.042) * UiScale;
 
-        // кнопки: клавиатурный расклад, на 20% меньше, приподняты выше
-        double controlsH = H * 0.19;
+        // кнопки
+        double controlsH = H * 0.17 * UiScale;
         btnS = Math.Min((W - margin * 2) / 4.8, controlsH * 0.72) * 0.8;
 
+        // ПОЛЕ занимает только область слева от панели статистики
+        panelW = Math.Min(W * 0.26, 140) * UiScale;
+        double gap = margin;
+        double boardAreaW = W - margin * 2 - panelW - gap;
+
         double availH = H - titleH - controlsH - margin * 3;
-        cell = Math.Floor(Math.Min((W - margin * 2) / BoardW, availH / BoardH));
+        cell = Math.Floor(Math.Min(boardAreaW / BoardW, availH / BoardH));
         boardX = margin;
         boardY = titleH + margin;
         boardPxW = cell * BoardW;
         boardPxH = cell * BoardH;
 
         // правая панель статистики
-        panelW = Math.Min(W * 0.30, 150);
-        double gap = margin;
-        double boardAreaW = W - margin * 2 - panelW - gap;
         panelX = margin + boardAreaW + gap;
         panelY = boardY;
-        nextCardH = Math.Min(92, cell * 3.2);
-        panelCardH = Math.Min(72, cell * 2.5);
+        nextCardH = Math.Min(80, cell * 2.9) * UiScale;
+        panelCardH = Math.Min(60, cell * 2.2) * UiScale;
 
-        // кнопки: 4 колонки, 2 ряда. Стрелки — крест как на клавиатуре, пауза правее.
+        // кнопки: 4 колонки, 2 ряда, приподняты выше
         double rowGap = btnS * 0.30;
         double descH = Math.Max(12, btnS * 0.26);
         double totalBtnH = btnS * 2 + rowGap + descH;
-        double bottom = H - margin - H * 0.015;   // приподнять над нижней кромкой
+        double bottom = H - margin - H * 0.05;   // приподнять над нижней кромкой
         double row1Y = bottom - totalBtnH;
         double row2Y = row1Y + btnS + rowGap;
         btnAreaTop = row1Y;
@@ -456,6 +502,16 @@ public class GamePage : ContentPage
         btnX[1] = col(1); btnY[1] = row2Y;   // ▼ вниз
         btnX[2] = col(2); btnY[2] = row2Y;   // ▶ вправо
         btnX[4] = col(3); btnY[4] = row2Y;   // ⬇ сброс
+
+        // кнопки главного меню
+        double mw = Math.Min(W * 0.62, 300);
+        double mh = Math.Min(H * 0.052, 50) * UiScale;
+        double sw = (mw - 2 * 8) / 3;
+        double my0 = H * 0.565;
+        for (int i = 0; i < 3; i++)
+            speedRect[i] = (W / 2 - mw / 2 + i * (sw + 8), my0, sw, mh);
+        playRect = (W / 2 - mw / 2, my0 + mh + 16, mw, mh * 1.15);
+        menuExitRect = (W / 2 - mw / 2, my0 + mh * 2 + 30, mw, mh * 0.95);
     }
 
     // ---- Отрисовка ----
@@ -467,9 +523,9 @@ public class GamePage : ContentPage
         g.FillColor = Color.FromArgb("#12121C");
         g.FillRectangle(F(0), F(0), F(W), F(H));
 
-        if (state == State.Intro)
+        if (state == State.Menu)
         {
-            DrawIntro(g);
+            DrawMenu(g);
             return;
         }
 
@@ -576,58 +632,167 @@ public class GamePage : ContentPage
         g.DrawString("\u0422\u0435\u0442\u0440\u0438\u0441", F(boardX + boardPxW / 2), F(titleH * 0.85), HorizontalAlignment.Center);
     }
 
-    // ---- Заставка «KDOPROG presents games Tetris» ----
-    void DrawIntro(ICanvas g)
+    static double EaseOutCubic(double x)
     {
-        double t = (Environment.TickCount64 - introStart) / 1000.0;
-        double pulse = 0.5 + 0.5 * Math.Sin(t * 2.4);
+        x = Math.Clamp(x, 0, 1);
+        double t = 1 - x;
+        return 1 - t * t * t;
+    }
 
-        // падающие блошки по краям
-        for (int i = 0; i < 14; i++)
-        {
-            double speed = 0.10 + (i % 5) * 0.03;
-            double bx = W * (0.04 + 0.09 * (i % 7));
-            if (i > 6) bx = W - W * (0.04 + 0.09 * ((i - 7) % 7));
-            double by = (t * speed * H + i * H * 0.13) % (H * 1.2) - H * 0.1;
-            double bs = Math.Max(12, W * 0.045);
-            var c = Color.FromArgb(ShapeHex[i % ShapeHex.Length]);
-            g.Alpha = 0.55f;
-            g.FillColor = c;
-            g.FillRoundedRectangle(F(bx), F(by), F(bs), F(bs), F(bs * 0.18));
-            g.Alpha = 1f;
-        }
-
+    // ---- Стартовое меню с «видео-эффектами» ----
+    void DrawMenu(ICanvas g)
+    {
+        double t = (Environment.TickCount64 - stateStart) / 1000.0;
         double cx = W / 2;
-        double fs1 = Math.Min(W * 0.105, 44);
-        SetFont(g, fs1 * 0.62, true, Color.FromArgb("#00BFFF"), BodyFont);
-        g.DrawString("KDOPROG", F(cx), F(H * 0.28), HorizontalAlignment.Center);
 
-        SetFont(g, fs1 * 0.4, false, Color.FromArgb("#A0A0C3"), BodyFont);
-        g.DrawString("presents games", F(cx), F(H * 0.28 + fs1 * 0.85), HorizontalAlignment.Center);
+        // 1. параллакс: три слоя падающих блошек
+        for (int layer = 0; layer < 3; layer++)
+        {
+            double speed = 0.06 + layer * 0.05;
+            double size = W * (0.035 + layer * 0.012);
+            g.Alpha = F(0.18f + layer * 0.12f);
+            for (int i = 0; i < 6; i++)
+            {
+                int n = layer * 6 + i;
+                double bx = W * (0.05 + 0.17 * (n % 6));
+                if (n % 2 == 1) bx = W - bx;
+                double by = (t * speed * H + i * H * 0.19 + layer * H * 0.07) % (H * 1.2) - H * 0.1;
+                g.FillColor = Color.FromArgb(ShapeHex[(n * 5 + layer) % ShapeHex.Length]);
+                g.FillRoundedRectangle(F(bx), F(by), F(size), F(size), F(size * 0.2));
+            }
+        }
+        g.Alpha = 1f;
 
-        double fs2 = Math.Min(W * 0.24, 92) * (1 + 0.04 * pulse);
-        SetFont(g, fs2, true, Color.FromArgb("#FFD700"), TitleFont);
-        g.DrawString("\u0422\u0415\u0422\u0420\u0418\u0421", F(cx), F(H * 0.52), HorizontalAlignment.Center);
-
-        // декоративный ряд фигурок
-        double iy = H * 0.62;
+        // 2. бегущий световой луч
+        double beamX = ((t * 0.22) % 1.6 - 0.3) * W;
         for (int i = 0; i < 7; i++)
         {
-            var c = Color.FromArgb(ShapeHex[i]);
-            g.FillColor = c;
-            g.FillRoundedRectangle(F(cx - 3 * W * 0.075 + i * W * 0.075 - W * 0.017), F(iy), F(W * 0.034), F(W * 0.034), F(W * 0.006));
+            g.Alpha = F(0.05f * (1 - Math.Abs(i - 3) / 3f));
+            g.FillColor = Color.FromArgb("#8FD3FF");
+            g.FillRectangle(F(beamX + i * 10), F(0), F(6), F(H));
+        }
+        g.Alpha = 1f;
+
+        // 3. мерцающие искры
+        for (int i = 0; i < 18; i++)
+        {
+            double sx = W * (0.06 + 0.88 * (((i * 37) % 89) / 89.0));
+            double sy = H * (0.05 + 0.9 * (((i * 53) % 97) / 97.0));
+            double tw = 0.5 + 0.5 * Math.Sin(t * 2.6 + i * 1.7);
+            g.Alpha = F(0.25f + 0.45f * tw);
+            g.FillColor = Colors.White;
+            g.FillEllipse(F(sx), F(sy), F(2.5), F(2.5));
+        }
+        g.Alpha = 1f;
+
+        // 4. «KDOPROG presents games» (появляется первым)
+        double a1 = Math.Clamp(t / 0.5, 0, 1);
+        double fs1 = Math.Min(W * 0.105, 42) * UiScale;
+        g.Alpha = F(a1);
+        SetFont(g, fs1 * 0.62, true, Color.FromArgb("#00BFFF"));
+        g.DrawString("KDOPROG", F(cx), F(H * 0.16), HorizontalAlignment.Center);
+        SetFont(g, fs1 * 0.38, false, Color.FromArgb("#A0A0C3"));
+        g.DrawString("presents games", F(cx), F(H * 0.16 + fs1 * 0.75), HorizontalAlignment.Center);
+        g.Alpha = 1f;
+
+        // 5. золотое свечение + заголовок с «zoom-in»
+        double ease = EaseOutCubic(t / 1.1);
+        double pulse = 0.5 + 0.5 * Math.Sin(t * 2.4);
+        double fs2 = Math.Min(W * 0.24, 92) * (0.6 + 0.4 * ease);
+        double titleY = H * 0.30;
+        g.Alpha = F(0.14f + 0.1f * pulse);
+        g.FillColor = Color.FromArgb("#FFD700");
+        g.FillEllipse(F(cx - W * 0.42), F(titleY - fs2 * 0.75), F(W * 0.84), F(fs2 * 1.5));
+        g.Alpha = F(ease);
+        SetFont(g, fs2 * (1 + 0.03 * pulse), true, Color.FromArgb("#FFD700"), TitleFont);
+        g.DrawString("\u0422\u0415\u0422\u0420\u0418\u0421", F(cx), F(titleY), HorizontalAlignment.Center);
+        g.Alpha = 1f;
+
+        // 6. плавающий ряд фигурок
+        double iy = H * 0.415;
+        for (int i = 0; i < 7; i++)
+        {
+            double bob = Math.Sin(t * 2 + i * 0.9) * 5;
+            g.FillColor = Color.FromArgb(ShapeHex[i]);
+            g.FillRoundedRectangle(F(cx - 3 * W * 0.075 + i * W * 0.075 - W * 0.017), F(iy + bob), F(W * 0.034), F(W * 0.034), F(W * 0.006));
         }
 
-        SetFont(g, fs1 * 0.34, false, new Color(F(0.75 + 0.25 * pulse), F(0.8 + 0.2 * pulse), 1f, 1f), BodyFont);
-        g.DrawString("\u0442\u0430\u043F\u043D\u0438\u0442\u0435 \u0434\u043B\u044F \u043D\u0430\u0447\u0430\u043B\u0430", F(cx), F(H * 0.86), HorizontalAlignment.Center);
+        // 7. кнопки меню (плавное появление)
+        double fadeIn = Math.Clamp((t - 0.7) / 0.5, 0, 1);
+        g.Alpha = F(fadeIn);
+
+        SetFont(g, Math.Max(11, H * 0.016), true, Color.FromArgb("#A0A0C3"));
+        g.DrawString("\u0421\u041A\u041E\u0420\u041E\u0421\u0422\u042C", F(cx), F(speedRect[0].Y - H * 0.013), HorizontalAlignment.Center);
+
+        double chipR = Math.Min(10, speedRect[0].H * 0.3);
+        for (int i = 0; i < 3; i++)
+        {
+            var r = speedRect[i];
+            bool sel = i == selectedSpeed;
+            if (sel)
+            {
+                g.Alpha = F(fadeIn * 0.3f);
+                g.FillColor = Color.FromArgb("#FFD700");
+                g.FillRoundedRectangle(F(r.X - 3), F(r.Y - 3), F(r.W + 6), F(r.H + 6), F(chipR + 3));
+                g.Alpha = F(fadeIn);
+            }
+            g.FillColor = sel ? Color.FromArgb("#3A3320") : Color.FromArgb("#232340");
+            g.FillRoundedRectangle(F(r.X), F(r.Y), F(r.W), F(r.H), F(chipR));
+            g.StrokeColor = sel ? Color.FromArgb("#FFD700") : Color.FromArgb("#4B4B78");
+            g.StrokeSize = sel ? 2f : 1f;
+            g.DrawRoundedRectangle(F(r.X), F(r.Y), F(r.W), F(r.H), F(chipR));
+            SetFont(g, r.H * 0.3, sel, sel ? Color.FromArgb("#FFD700") : Color.FromArgb("#C9C9E0"));
+            g.DrawString(SpeedNames[i], F(r.X + r.W / 2), F(r.Y + r.H * 0.62), HorizontalAlignment.Center);
+        }
+
+        // кнопка «Играть» с пульсацией
+        var pb = playRect;
+        g.Alpha = F(fadeIn * (0.22f + 0.14f * pulse));
+        g.FillColor = Color.FromArgb("#33CC33");
+        g.FillRoundedRectangle(F(pb.X - 4), F(pb.Y - 4), F(pb.W + 8), F(pb.H + 8), F(14));
+        g.Alpha = F(fadeIn);
+        g.FillColor = Color.FromArgb("#0E8A46");
+        g.FillRoundedRectangle(F(pb.X), F(pb.Y), F(pb.W), F(pb.H), F(12));
+        g.StrokeColor = Color.FromArgb("#33CC33");
+        g.StrokeSize = 2f;
+        g.DrawRoundedRectangle(F(pb.X), F(pb.Y), F(pb.W), F(pb.H), F(12));
+        SetFont(g, pb.H * 0.38, true, Colors.White, TitleFont);
+        g.DrawString("\u0418\u0413\u0420\u0410\u0422\u042C", F(pb.X + pb.W / 2), F(pb.Y + pb.H * 0.63), HorizontalAlignment.Center);
+
+        // кнопка «Выход»
+        var mb = menuExitRect;
+        g.FillColor = Color.FromArgb("#3A1620");
+        g.FillRoundedRectangle(F(mb.X), F(mb.Y), F(mb.W), F(mb.H), F(12));
+        g.StrokeColor = Color.FromArgb("#FF5050");
+        g.StrokeSize = 1.5f;
+        g.DrawRoundedRectangle(F(mb.X), F(mb.Y), F(mb.W), F(mb.H), F(12));
+        SetFont(g, mb.H * 0.34, true, Color.FromArgb("#FF9A9A"), TitleFont);
+        g.DrawString("\u0412\u042B\u0425\u041E\u0414", F(mb.X + mb.W / 2), F(mb.Y + mb.H * 0.62), HorizontalAlignment.Center);
+
+        // версия
+        SetFont(g, Math.Max(10, H * 0.014), false, Color.FromArgb("#5A5A80"));
+        g.DrawString("v5.1", F(W - 14), F(H - 26), HorizontalAlignment.Right);
+
+        g.Alpha = 1f;
+
+        // подсветка нажатой кнопки меню
+        long now = Environment.TickCount64;
+        if (pressBtn.X > 0 && now < pressUntilBtn)
+        {
+            g.Alpha = 0.3f;
+            g.FillColor = Color.FromArgb("#FFD700");
+            double pr = Math.Max(30, btnS * 0.5);
+            g.FillEllipse(F(pressBtn.X - pr), F(pressBtn.Y - pr), F(pr * 2), F(pr * 2));
+            g.Alpha = 1f;
+        }
     }
 
     void DrawRightPanel(ICanvas g)
     {
         if (panelX >= W - 10) return;
         double gap = 8;
-        double titleFs = panelCardH * 0.26;
-        double valueFs = panelCardH * 0.46;
+        double titleFs = panelCardH * 0.28;
+        double valueFs = panelCardH * 0.5;
         double cy = panelY;
 
         void Card(double y, double h, string title, string value, Color color)
@@ -713,7 +878,7 @@ public class GamePage : ContentPage
             g.DrawString(desc, F(x + btnS / 2), F(y + btnS + descH * 0.9), HorizontalAlignment.Center);
         }
 
-        // подсветка кнопки, нажатой из заставки/тап-зоны (центр-точка)
+        // подсветка кнопки, нажатой из тап-зоны (центр-точка)
         if (pressBtn.X > 0 && now < pressUntilBtn)
         {
             g.Alpha = 0.35f;
@@ -744,7 +909,7 @@ public class GamePage : ContentPage
         g.FillRectangle(F(0), F(0), F(W), F(H));
         g.Alpha = 1f;
 
-        double t = (Environment.TickCount64 - introStart) / 1000.0;
+        double t = (Environment.TickCount64 - stateStart) / 1000.0;
         double pulse = 0.5 + 0.5 * Math.Sin(t * 2.0);
         double cx = W / 2;
 
@@ -800,7 +965,7 @@ public class GamePage : ContentPage
         againBtnRect = (b1x, btnY, btnW, btnH);
         exitBtnRect = (b2x, btnY, btnW, btnH);
         DrawBigButton(g, b1x, btnY, btnW, btnH, "\u0417\u0430\u043D\u043E\u0432\u043E", Color.FromArgb("#0E8A46"), Color.FromArgb("#33CC33"));
-        DrawBigButton(g, b2x, btnY, btnW, btnH, "\u0412\u044B\u0445\u043E\u0434", Color.FromArgb("#8A2020"), Color.FromArgb("#FF5050"));
+        DrawBigButton(g, b2x, btnY, btnW, btnH, "\u041C\u0435\u043D\u044E", Color.FromArgb("#1E3A5C"), Color.FromArgb("#00BFFF"));
     }
 
     void DrawPauseOverlay(ICanvas g)
@@ -827,3 +992,4 @@ public class GamePage : ContentPage
         public void Draw(ICanvas canvas, RectF dirtyRect) => owner.Draw(canvas);
     }
 }
+
