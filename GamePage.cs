@@ -6,6 +6,8 @@ public class GamePage : ContentPage
 {
     const int BoardW = 10;
     const int BoardH = 20;
+    const string TitleFont = "Ruslan Display";
+    const string BodyFont = "Alegreya";
 
     static float F(double v) => (float)v;
 
@@ -32,6 +34,8 @@ public class GamePage : ContentPage
         "#FF8000", // L оранжевый
     };
 
+    (string Glyph, string Desc, Action Act)[] Buttons = Array.Empty<(string, string, Action)>();
+
     readonly GraphicsView view;
     readonly IDispatcherTimer timer;
 
@@ -48,7 +52,12 @@ public class GamePage : ContentPage
     long acc;
 
     // метрики макета (пересчитываются при каждой отрисовке)
-    double W, H, topBarH, cell, boardX, boardY, boardPxW, boardPxH, panelX;
+    double W, H, titleH, cell, boardX, boardY, boardPxW, boardPxH;
+    double nextX, nextY, nextW, nextH;
+    double infoX, infoY, infoW, infoCardH;
+    double[] btnX = new double[6];
+    double[] btnY = new double[6];
+    double btnS;
 
     public GamePage()
     {
@@ -63,6 +72,16 @@ public class GamePage : ContentPage
         var tap = new TapGestureRecognizer();
         tap.Tapped += OnTap;
         view.GestureRecognizers.Add(tap);
+
+        Buttons = new (string, string, Action)[]
+        {
+            ("\u25C0", "\u0432\u043B\u0435\u0432\u043E", () => TryMove(-1, 0)),
+            ("\u25B2", "\u043F\u043E\u0432\u043E\u0440\u043E\u0442", TryRotate),
+            ("\u25BC", "\u0432\u043D\u0438\u0437", SoftDrop),
+            ("\u25B6", "\u0432\u043F\u0440\u0430\u0432\u043E", () => TryMove(1, 0)),
+            ("\u21B3", "\u0441\u0431\u0440\u043E\u0441", HardDrop),
+            ("\u2758\u2758", "\u043F\u0430\u0443\u0437\u0430", TogglePause),
+        };
 
         InitGame();
 
@@ -137,6 +156,17 @@ public class GamePage : ContentPage
         }
     }
 
+    void SoftDrop()
+    {
+        if (gameOver || paused) return;
+        if (!Collides(piece, px, py + 1))
+        {
+            py++;
+            score++;
+            view.Invalidate();
+        }
+    }
+
     void TryRotate()
     {
         if (gameOver || paused) return;
@@ -163,6 +193,13 @@ public class GamePage : ContentPage
         }
         view.Invalidate();
         LockPiece();
+    }
+
+    void TogglePause()
+    {
+        if (gameOver) return;
+        paused = !paused;
+        view.Invalidate();
     }
 
     void LockPiece()
@@ -228,39 +265,67 @@ public class GamePage : ContentPage
         var pos = e.GetPosition(view);
         double tapX = pos?.X ?? 0;
         double tapY = pos?.Y ?? 0;
-        if (tapY < topBarH)
-        {
-            if (tapX > W * 0.72) paused = !paused;
-            else TryRotate();
-            view.Invalidate();
-            return;
-        }
+
+        for (int i = 0; i < Buttons.Length; i++)
+            if (tapX >= btnX[i] && tapX <= btnX[i] + btnS && tapY >= btnY[i] && tapY <= btnY[i] + btnS)
+            {
+                Buttons[i].Act();
+                return;
+            }
+
         if (paused)
         {
             paused = false;
             view.Invalidate();
             return;
         }
-        double t = tapX / Math.Max(1, W);
-        if (t < 1.0 / 3) TryMove(-1, 0);
-        else if (t > 2.0 / 3) TryMove(1, 0);
-        else HardDrop();
     }
 
-    // ---- Макет ----
+    // ---- Макет (книжная раскладка) ----
     void Layout()
     {
-        double margin = Math.Max(8, W * 0.025);
-        topBarH = Math.Max(46, H * 0.075);
-        double panelW = Math.Min(W * 0.28, 150);
-        double availW = W - panelW - margin * 3;
-        double availH = H - topBarH - margin * 2;
-        cell = Math.Floor(Math.Min(availW / BoardW, availH / BoardH));
-        boardX = margin;
-        boardY = topBarH + margin + (availH - cell * BoardH) / 2;
+        double margin = Math.Max(8, W * 0.035);
+        titleH = Math.Max(44, H * 0.055);
+
+        double controlsH = H * 0.21;
+        btnS = Math.Min((W - margin * 2) / 4.6, controlsH * 0.78);
+
+        double availH = H - titleH - controlsH - margin * 3;
+        cell = Math.Floor(Math.Min((W - margin * 2) / BoardW, availH / BoardH));
+        boardX = margin + ((W - margin * 2) - cell * BoardW) / 2;
+        boardY = titleH + margin;
         boardPxW = cell * BoardW;
         boardPxH = cell * BoardH;
-        panelX = boardX + boardPxW + margin * 1.5;
+
+        // верхняя строка: [Дальше] [Счёт] [Линии] [Уровень]
+        infoY = boardY + boardPxH + margin;
+        double infoH = Math.Min(86, cell * 2.9);
+        double gap = 6;
+        double each = (W - margin * 2 - gap * 3) / 4;
+
+        nextX = margin;
+        nextY = infoY;
+        nextW = each;
+        nextH = infoH;
+        infoX = margin + each + gap;
+        infoW = each;
+        infoCardH = infoH;
+
+        // кнопки: 2 ряда по 3
+        double rowGap = 14;
+        double descH = Math.Max(14, btnS * 0.26);
+        double totalBtnH = btnS * 2 + rowGap + descH;
+        double bottom = H - margin;
+        double row1Y = bottom - totalBtnH;
+        double row2Y = row1Y + btnS + rowGap + descH * 0;
+        double step = (W - margin * 2) / 3;
+        for (int i = 0; i < 6; i++)
+        {
+            int row = i / 3, col = i % 3;
+            double cellX = margin + col * step;
+            btnX[i] = cellX + (step - btnS) / 2;
+            btnY[i] = row == 0 ? row1Y : row2Y;
+        }
     }
 
     // ---- Отрисовка ----
@@ -272,7 +337,7 @@ public class GamePage : ContentPage
         g.FillColor = Color.FromArgb("#12121C");
         g.FillRectangle(F(0), F(0), F(W), F(H));
 
-        DrawTopBar(g);
+        DrawTitle(g);
 
         // фон поля
         g.FillColor = Colors.Black;
@@ -353,72 +418,60 @@ public class GamePage : ContentPage
         g.StrokeSize = 2f;
         g.DrawRectangle(F(boardX - 2), F(boardY - 2), F(boardPxW + 4), F(boardPxH + 4));
 
-        DrawPanel(g);
+        DrawInfoRow(g);
+        DrawButtons(g);
         DrawOverlay(g);
     }
 
-    void SetFont(ICanvas g, double size, bool bold, Color color)
+    void SetFont(ICanvas g, double size, bool bold, Color color, string family = BodyFont)
     {
-        g.Font = new Microsoft.Maui.Graphics.Font(string.Empty, bold ? FontWeights.Bold : FontWeights.Normal, FontStyleType.Normal);
+        g.Font = new Microsoft.Maui.Graphics.Font(family, bold ? FontWeights.Bold : FontWeights.Normal, FontStyleType.Normal);
         g.FontSize = F(size);
         g.FontColor = color;
     }
 
-    void DrawTopBar(ICanvas g)
+    void DrawTitle(ICanvas g)
     {
-        double fs = topBarH * 0.38;
-        SetFont(g, fs, true, Colors.White);
-        g.DrawString($"СЧЁТ: {score}    УРОВЕНЬ: {level}", F(W * 0.30), F(topBarH * 0.68), HorizontalAlignment.Center);
+        SetFont(g, titleH * 0.7, true, Color.FromArgb("#FFD700"), TitleFont);
+        g.DrawString("\u0422\u0435\u0442\u0440\u0438\u0441", F(W * 0.18), F(titleH * 0.85), HorizontalAlignment.Center);
 
-        SetFont(g, fs * 0.75, true, Color.FromArgb("#FFCC00"));
-        g.DrawString(paused ? "ПАУЗА" : "ПАУЗА | ПОВОРОТ", F(W * 0.84), F(topBarH * 0.65), HorizontalAlignment.Center);
+        SetFont(g, titleH * 0.4, true, Color.FromArgb("#A0A0C3"));
+        g.DrawString($"Счёт: {score}   ·   Линии: {lines}   ·   Уровень: {level}", F(W * 0.5), F(titleH * 0.85), HorizontalAlignment.Center);
     }
 
-    void DrawPanel(ICanvas g)
+    void DrawInfoRow(ICanvas g)
     {
-        if (panelX >= W - 20) return;
-        double pw = W - panelX - 8;
-        double cardH = Math.Min(86, cell * 3.1);
-        double gap = 12;
-        double y0 = boardY;
+        double titleFs = infoCardH * 0.24;
+        double valueFs = infoCardH * 0.42;
 
-        double titleFs = cell * 0.42;
-        double valueFs = cell * 0.8;
-
-        void Card(double y, string title, string value, Color color)
+        void Card(double x, string title, string value, Color color)
         {
             g.FillColor = Color.FromArgb("#232340");
-            g.FillRoundedRectangle(F(panelX), F(y), F(pw), F(cardH), F(10));
+            g.FillRoundedRectangle(F(x), F(infoY), F(infoW), F(infoCardH), F(10));
             g.StrokeColor = Color.FromArgb("#4B4B78");
             g.StrokeSize = 1f;
-            g.DrawRoundedRectangle(F(panelX), F(y), F(pw), F(cardH), F(10));
+            g.DrawRoundedRectangle(F(x), F(infoY), F(infoW), F(infoCardH), F(10));
 
             SetFont(g, titleFs, true, Color.FromArgb("#A0A0C3"));
-            g.DrawString(title, F(panelX + 12), F(y + titleFs * 1.1), HorizontalAlignment.Left);
+            g.DrawString(title, F(x + infoW / 2), F(infoY + titleFs * 0.95), HorizontalAlignment.Center);
 
             SetFont(g, valueFs, true, color);
-            g.DrawString(value, F(panelX + 12), F(y + cardH * 0.8), HorizontalAlignment.Left);
+            g.DrawString(value, F(x + infoW / 2), F(infoY + infoCardH * 0.82), HorizontalAlignment.Center);
         }
 
-        Card(y0, "СЧЁТ", score.ToString(), Color.FromArgb("#FFCC00"));
-        Card(y0 + cardH + gap, "ЛИНИИ", lines.ToString(), Color.FromArgb("#33CC33"));
-        Card(y0 + (cardH + gap) * 2, "УРОВЕНЬ", level.ToString(), Color.FromArgb("#00BFFF"));
-
         // окно «Дальше»
-        double ny = y0 + (cardH + gap) * 3;
-        double nh = Math.Min(96, cell * 3.4);
         g.FillColor = Color.FromArgb("#232340");
-        g.FillRoundedRectangle(F(panelX), F(ny), F(pw), F(nh), F(10));
+        g.FillRoundedRectangle(F(nextX), F(nextY), F(nextW), F(nextH), F(10));
         g.StrokeColor = Color.FromArgb("#4B4B78");
         g.StrokeSize = 1f;
-        g.DrawRoundedRectangle(F(panelX), F(ny), F(pw), F(nh), F(10));
+        g.DrawRoundedRectangle(F(nextX), F(nextY), F(nextW), F(nextH), F(10));
         SetFont(g, titleFs, true, Color.FromArgb("#A0A0C3"));
-        g.DrawString("ДАЛЬШЕ", F(panelX + 12), F(ny + titleFs * 1.1), HorizontalAlignment.Left);
+        g.DrawString("Дальше", F(nextX + nextW / 2), F(nextY + titleFs * 0.95), HorizontalAlignment.Center);
 
-        double sc = Math.Min(16, (Math.Min(pw, nh) - 40) / 4.0);
+        double sc = Math.Min(15, (Math.Min(nextW, nextH) - 40) / 4.0);
         double totalW = 4 * sc, totalH = 4 * sc;
-        double ox = panelX + (pw - totalW) / 2;
-        double oy = ny + 18 + (nh - 18 - totalH) / 2;
+        double ox = nextX + (nextW - totalW) / 2;
+        double oy = nextY + titleFs * 1.2 + (nextH - titleFs * 1.2 - totalH) / 2;
         g.FillColor = Color.FromArgb(ShapeHex[nextIdx]);
         var npMain = new PathF();
         for (int y = 0; y < 4; y++)
@@ -426,6 +479,35 @@ public class GamePage : ContentPage
                 if (nextPiece[y * 4 + x] != 0)
                     npMain.AppendRectangle(F(ox + x * sc + 1), F(oy + y * sc + 1), F(sc - 2), F(sc - 2), true);
         g.FillPath(npMain, WindingMode.NonZero);
+
+        double gap = 6;
+        Card(infoX + 0 * (infoW + gap), "Счёт", score.ToString(), Color.FromArgb("#FFCC00"));
+        Card(infoX + 1 * (infoW + gap), "Линии", lines.ToString(), Color.FromArgb("#33CC33"));
+        Card(infoX + 2 * (infoW + gap), "Уровень", level.ToString(), Color.FromArgb("#00BFFF"));
+    }
+
+    void DrawButtons(ICanvas g)
+    {
+        double descH = Math.Max(13, btnS * 0.24);
+        double rad = btnS * 0.22;
+
+        for (int i = 0; i < Buttons.Length; i++)
+        {
+            var (glyph, desc, _) = Buttons[i];
+            double x = btnX[i], y = btnY[i];
+
+            g.FillColor = paused ? new Color(0.14f, 0.14f, 0.22f, 1f) : Color.FromArgb("#232340");
+            g.FillRoundedRectangle(F(x), F(y), F(btnS), F(btnS), F(rad));
+            g.StrokeColor = paused ? Color.FromArgb("#3A3A5C") : Color.FromArgb("#00BFFF");
+            g.StrokeSize = 1.5f;
+            g.DrawRoundedRectangle(F(x), F(y), F(btnS), F(btnS), F(rad));
+
+            SetFont(g, btnS * 0.4, true, Colors.White);
+            g.DrawString(glyph, F(x + btnS / 2), F(y + btnS * 0.62), HorizontalAlignment.Center);
+
+            SetFont(g, descH, true, Color.FromArgb("#A0A0C3"));
+            g.DrawString(desc, F(x + btnS / 2), F(y + btnS + descH * 0.9), HorizontalAlignment.Center);
+        }
     }
 
     void DrawOverlay(ICanvas g)
@@ -436,21 +518,26 @@ public class GamePage : ContentPage
         g.FillRectangle(F(0), F(0), F(W), F(H));
         g.Alpha = 1f;
 
-        string title = gameOver ? "ИГРА ОКОНЧЕНА" : "ПАУЗА";
+        string title = gameOver ? "\u0418\u0433\u0440\u0430 \u043E\u043A\u043E\u043D\u0447\u0435\u043D\u0430" : "\u041F\u0430\u0443\u0437\u0430";
         string? sub = gameOver ? $"Счёт: {score}" : null;
-        string hint = gameOver ? "Тапните, чтобы начать заново" : "Тапните, чтобы продолжить";
+        string hint = gameOver
+            ? "Тапните — начать заново"
+            : "Тап «Пауза» или поле — продолжить";
         Color c = gameOver ? Color.FromArgb("#FF5050") : Color.FromArgb("#FFCC00");
 
-        double fs = Math.Min(34, boardPxW * 0.075);
+        double fs = Math.Min(40, boardPxW * 0.085);
         double cx = boardX + boardPxW / 2;
         double cy = boardY + boardPxH / 3;
 
-        SetFont(g, fs, true, c);
+        SetFont(g, fs, true, c, TitleFont);
         g.DrawString(title, F(cx), F(cy), HorizontalAlignment.Center);
         if (sub != null)
-            g.DrawString(sub, F(cx), F(cy + fs * 1.6), HorizontalAlignment.Center);
-        SetFont(g, fs * 0.5, false, Colors.White);
-        g.DrawString(hint, F(cx), F(cy + fs * (sub != null ? 2.8 : 2.0)), HorizontalAlignment.Center);
+        {
+            SetFont(g, fs * 0.6, true, c);
+            g.DrawString(sub, F(cx), F(cy + fs * 1.5), HorizontalAlignment.Center);
+        }
+        SetFont(g, fs * 0.45, false, Colors.White);
+        g.DrawString(hint, F(cx), F(cy + fs * (sub != null ? 2.5 : 1.9)), HorizontalAlignment.Center);
     }
 
     sealed class PageDrawable : IDrawable
